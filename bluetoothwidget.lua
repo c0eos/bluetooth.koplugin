@@ -1,70 +1,208 @@
---[[--
-Network setting widget.
-
-Example:
-
-    local network_list = {
-        {
-            ssid = "foo",
-            signal_level = -58,
-            flags = "[WPA2-PSK-CCMP][ESS]",
-            signal_quality = 84,
-            password = "123abc",
-            connected = true,
-        },
-        {
-            ssid = "bar",
-            signal_level = -258,
-            signal_quality = 44,
-            flags = "[WEP][ESS]",
-        },
-    }
-    UIManager:show(require("ui/widget/networksetting"):new{
-        network_list = network_list,
-        connect_callback = function()
-            -- connect_callback will be called when a *connect* (NOT disconnect)
-            -- attempt has been successful.
-            -- You can update UI widgets in the callback.
-        end,
-        disconnect_callback = function()
-            -- This one will fire unconditionally after a disconnect attempt.
-        end,
-    })
-
-]]
-
 local BD = require("ui/bidi")
+local ListView = require("ui/widget/listview")
 local bit = require("bit")
-local Blitbuffer = require("ffi/blitbuffer")
-local CenterContainer = require("ui/widget/container/centercontainer")
-local Device = require("device")
-local Font = require("ui/font")
 local Geom = require("ui/geometry")
-local FrameContainer = require("ui/widget/container/framecontainer")
-local GestureRange = require("ui/gesturerange")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
-local HorizontalSpan = require("ui/widget/horizontalspan")
-local IconWidget = require("ui/widget/iconwidget")
-local ImageWidget = require("ui/widget/imagewidget")
+local Font = require("ui/font")
+local Blitbuffer = require("ffi/blitbuffer")
+local Device = require("device")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
-local InputDialog = require("ui/widget/inputdialog")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local CenterContainer = require("ui/widget/container/centercontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
-local ListView = require("ui/widget/listview")
 local RightContainer = require("ui/widget/container/rightcontainer")
+local HorizontalGroup = require("ui/widget/horizontalgroup")
 local OverlapGroup = require("ui/widget/overlapgroup")
-local Size = require("ui/size")
-local TextWidget = require("ui/widget/textwidget")
-local UIManager = require("ui/uimanager")
-local util = require("util")
 local VerticalGroup = require("ui/widget/verticalgroup")
+local HorizontalSpan = require("ui/widget/horizontalspan")
+local GestureRange = require("ui/gesturerange")
+local TextWidget = require("ui/widget/textwidget")
+local ImageWidget = require("ui/widget/imagewidget")
+local Size = require("ui/size")
+local UIManager = require("ui/uimanager")
 local Widget = require("ui/widget/widget")
 local _ = require("gettext")
 local T = require("ffi/util").template
+
 local Screen = Device.screen
-
 local band = bit.band
+local logger = require("logger")
 
+---@class NetworkItem
+---@field height number
+---@field width number
+---@field info table
+---@field icon_size any
+local NetworkItem = InputContainer:extend({
+	dimen = nil,
+	height = Screen:scaleBySize(44),
+	icon_size = Screen:scaleBySize(32),
+	width = nil,
+	info = nil,
+	background = Blitbuffer.COLOR_WHITE,
+})
+
+function NetworkItem:init()
+	self.dimen = Geom:new({ x = 0, y = 0, w = self.width, h = self.height })
+	if not self.info.name or self.info.name == "" then
+		self.info.name = "[hidden]"
+	end
+
+	local bt_icon = "plugins/bluetooth.koplugin/bluetooth.svg"
+
+	local status = ""
+	if self.info.paired then
+		status = status .. "P"
+	end
+	if self.info.trusted then
+		status = status .. "T"
+	end
+	if self.info.connected then
+		status = status .. "C"
+	end
+
+	local name
+	if status ~= "" then
+		name = status .. " | " .. self.info.name
+	else
+		name = self.info.name
+	end
+
+	local horizontal_space = HorizontalSpan:new({ width = Size.span.horizontal_default })
+	self.content_container = OverlapGroup:new({
+		dimen = self.dimen:copy(),
+		LeftContainer:new({
+			dimen = self.dimen:copy(),
+			HorizontalGroup:new({
+				horizontal_space,
+				ImageWidget:new({
+					file = bt_icon,
+					width = self.icon_size,
+					height = self.icon_size,
+					alpha = true,
+					is_icon = true,
+				}),
+				horizontal_space,
+				TextWidget:new({
+					text = name,
+					face = Font:getFace("cfont"),
+				}),
+			}),
+		}),
+	})
+	self.btn_disconnect = nil
+	self.btn_edit_nw = nil
+	if self.info.connected then
+		self.btn_disconnect = FrameContainer:new({
+			bordersize = 0,
+			padding = 0,
+			TextWidget:new({
+				text = _("disconnect"),
+				face = Font:getFace("cfont"),
+			}),
+		})
+
+		table.insert(
+			self.content_container,
+			RightContainer:new({
+				dimen = self.dimen:copy(),
+				HorizontalGroup:new({
+					self.btn_disconnect,
+					horizontal_space,
+				}),
+			})
+		)
+		self.setting_ui:setConnectedItem(self)
+	end
+
+	self[1] = FrameContainer:new({
+		padding = 0,
+		margin = 0,
+		background = self.background,
+		bordersize = 0,
+		width = self.width,
+		self.content_container,
+	})
+
+	if Device:isTouchDevice() then
+		self.ges_events.TapSelect = {
+			GestureRange:new({
+				ges = "tap",
+				range = self.dimen,
+			}),
+		}
+		self.ges_events.Hold = {
+			GestureRange:new({
+				ges = "hold",
+				range = self.dimen,
+			}),
+		}
+	end
+end
+
+function NetworkItem:refresh()
+	self:init()
+	UIManager:setDirty(self.setting_ui, function()
+		return "ui", self.dimen
+	end)
+end
+
+function NetworkItem:connect()
+	local connected_item = self.setting_ui:getConnectedItem()
+	if connected_item then
+		connected_item:disconnect()
+	end
+
+	self.setting_ui.connect_callback(self.info)
+
+	local text = "Connected to " .. self.info.name
+
+	self:refresh()
+	UIManager:show(InfoMessage:new({ text = text, timeout = 3 }))
+end
+
+function NetworkItem:disconnect()
+	local info = InfoMessage:new({ text = _("Disconnecting…") })
+	UIManager:show(info)
+	UIManager:forceRePaint()
+
+	self.setting_ui.disconnect_callback(self.info)
+
+	UIManager:close(info)
+
+	self:refresh()
+end
+
+function NetworkItem:forget()
+	local info = InfoMessage:new({ text = _("Forgetting device") })
+	UIManager:show(info)
+	UIManager:forceRePaint()
+
+	self.setting_ui.forget_callback(self.info)
+
+	UIManager:close(info)
+
+	self:refresh()
+end
+
+function NetworkItem:onTapSelect(arg, ges_ev)
+	if self.btn_disconnect then
+		-- noop if touch is not on disconnect button
+		if ges_ev.pos:intersectWith(self.btn_disconnect.dimen) then
+			self:disconnect()
+		end
+	else
+		self:connect()
+	end
+	return true
+end
+
+function NetworkItem:onHold(arg, ges_ev)
+	self:forget()
+	return true
+end
+
+---@class MinimalPaginator
 local MinimalPaginator = Widget:extend({
 	width = nil,
 	height = nil,
@@ -88,283 +226,17 @@ function MinimalPaginator:setProgress(progress)
 	self.progress = progress
 end
 
-local NetworkItem = InputContainer:extend({
-	dimen = nil,
-	height = Screen:scaleBySize(44),
-	icon_size = Screen:scaleBySize(32),
-	width = nil,
-	info = nil,
-	background = Blitbuffer.COLOR_WHITE,
-})
-
-function NetworkItem:init()
-	self.dimen = Geom:new({ x = 0, y = 0, w = self.width, h = self.height })
-	if not self.info.Name or self.info.Name == "" then
-		self.info.Name = "[hidden]"
-	end
-
-	local wifi_icon
-	-- if string.find(self.info.flags, "WPA") then
-	-- 	wifi_icon = "wifi.secure.%d"
-	-- else
-	-- 	wifi_icon = "wifi.open.%d"
-	-- end
-	-- c.f., https://github.com/NetworkManager/NetworkManager/blob/2fa8ef9fb9c7fe0cc2d9523eed6c5a3749b05175/clients/common/nm-client-utils.c#L585-L612
-	-- if self.info.signal_quality > 80 then
-	-- 	wifi_icon = string.format(wifi_icon, 100)
-	-- elseif self.info.signal_quality > 55 then
-	-- 	wifi_icon = string.format(wifi_icon, 75)
-	-- elseif self.info.signal_quality > 30 then
-	-- 	wifi_icon = string.format(wifi_icon, 50)
-	-- elseif self.info.signal_quality > 5 then
-	-- 	wifi_icon = string.format(wifi_icon, 25)
-	-- else
-	-- wifi_icon = "wifi.secure.%d"
-	-- wifi_icon = string.format(wifi_icon, 0)
-	wifi_icon = "plugins/bluetooth.koplugin/bluetooth.svg"
-	-- end
-	local name = self.info.Name
-	if self.info.Paired then
-		name = name .. " " .. "P"
-	end
-	if self.info.Trusted then
-		name = name .. " " .. "T"
-	end
-	if self.info.Connected then
-		name = name .. " " .. "C"
-	end
-	if self.info.RSSI then
-		name = name .. " " .. tostring(self.info.RSSI)
-	end
-
-	local horizontal_space = HorizontalSpan:new({ width = Size.span.horizontal_default })
-	self.content_container = OverlapGroup:new({
-		dimen = self.dimen:copy(),
-		LeftContainer:new({
-			dimen = self.dimen:copy(),
-			HorizontalGroup:new({
-				horizontal_space,
-				ImageWidget:new({
-					file = wifi_icon,
-					width = self.icon_size,
-					height = self.icon_size,
-					alpha = true,
-					is_icon = true,
-				}),
-				horizontal_space,
-				TextWidget:new({
-					text = name,
-					face = Font:getFace("cfont"),
-				}),
-			}),
-		}),
-	})
-	self.btn_disconnect = nil
-	self.btn_edit_nw = nil
-	-- if self.info.Connected then
-	-- 	self.btn_disconnect = FrameContainer:new({
-	-- 		bordersize = 0,
-	-- 		padding = 0,
-	-- 		TextWidget:new({
-	-- 			text = _("disconnect"),
-	-- 			face = Font:getFace("cfont"),
-	-- 		}),
-	-- 	})
-	--
-	-- 	table.insert(
-	-- 		self.content_container,
-	-- 		RightContainer:new({
-	-- 			dimen = self.dimen:copy(),
-	-- 			HorizontalGroup:new({
-	-- 				self.btn_disconnect,
-	-- 				horizontal_space,
-	-- 			}),
-	-- 		})
-	-- 	)
-	-- 	self.setting_ui:setConnectedItem(self)
-	-- end
-
-	self[1] = FrameContainer:new({
-		padding = 0,
-		margin = 0,
-		background = self.background,
-		bordersize = 0,
-		width = self.width,
-		self.content_container,
-	})
-
-	if Device:isTouchDevice() then
-		self.ges_events.TapSelect = {
-			GestureRange:new({
-				ges = "tap",
-				range = self.dimen,
-			}),
-		}
-	end
-end
-
-function NetworkItem:refresh()
-	self:init()
-	UIManager:setDirty(self.setting_ui, function()
-		return "ui", self.dimen
-	end)
-end
-
-function NetworkItem:connect()
-	local connected_item = self.setting_ui:getConnectedItem()
-	if connected_item then
-		connected_item:disconnect()
-	end
-
-	local success = true
-	local err_msg = "error"
-	local text
-	if success then
-		-- self.info.connected = true
-		self.setting_ui:setConnectedItem(self)
-		text = _("Connected.")
-	else
-		text = err_msg
-	end
-
-	-- Do what it says on the tin, and only trigger the connect_callback on a *successful* connect.
-	-- NOTE: This callback comes from NetworkManager, where it's named complete_callback.
-	if success and self.setting_ui.connect_callback then
-		self.setting_ui.connect_callback()
-	end
-
-	self:refresh()
-	UIManager:show(InfoMessage:new({ text = text, timeout = 3 }))
-end
-
-function NetworkItem:disconnect()
-	local info = InfoMessage:new({ text = _("Disconnecting…") })
-	UIManager:show(info)
-	UIManager:forceRePaint()
-
-	UIManager:close(info)
-	-- self.info.connected = nil
-	self:refresh()
-	self.setting_ui:setConnectedItem(nil)
-	if self.setting_ui.disconnect_callback then
-		self.setting_ui.disconnect_callback()
-	end
-end
-
-function NetworkItem:saveAndConnectToNetwork()
-	self:connect()
-
-	UIManager:close()
-end
-
--- function NetworkItem:onEditNetwork()
--- 	local password_input
--- 	password_input = InputDialog:new({
--- 		title = self.display_ssid,
--- 		input = self.info.password,
--- 		input_hint = _("password (leave empty for open networks)"),
--- 		input_type = "text",
--- 		text_type = "password",
--- 		buttons = {
--- 			{
--- 				{
--- 					text = _("Cancel"),
--- 					id = "close",
--- 					callback = function()
--- 						UIManager:close(password_input)
--- 					end,
--- 				},
--- 				{
--- 					text = _("Forget"),
--- 					callback = function()
--- 						NetworkMgr:deleteNetwork(self.info)
--- 						self.info.password = nil
--- 						-- remove edit button
--- 						table.remove(self.content_container, 2)
--- 						UIManager:close(password_input)
--- 						self:refresh()
--- 					end,
--- 				},
--- 				{
--- 					text = _("Connect"),
--- 					is_enter_default = true,
--- 					callback = function()
--- 						self:saveAndConnectToNetwork(password_input)
--- 					end,
--- 				},
--- 			},
--- 		},
--- 	})
--- 	UIManager:show(password_input)
--- 	password_input:onShowKeyboard()
--- 	return true
--- end
-
--- function NetworkItem:onAddNetwork()
--- 	local password_input
--- 	password_input = InputDialog:new({
--- 		title = self.display_ssid,
--- 		input = "",
--- 		input_hint = _("password (leave empty for open networks)"),
--- 		input_type = "text",
--- 		text_type = "password",
--- 		buttons = {
--- 			{
--- 				{
--- 					text = _("Cancel"),
--- 					id = "close",
--- 					callback = function()
--- 						UIManager:close(password_input)
--- 					end,
--- 				},
--- 				{
--- 					text = _("Connect"),
--- 					is_enter_default = true,
--- 					callback = function()
--- 						self:saveAndConnectToNetwork(password_input)
--- 					end,
--- 				},
--- 			},
--- 		},
--- 	})
--- 	UIManager:show(password_input)
--- 	password_input:onShowKeyboard()
--- 	return true
--- end
-
-function NetworkItem:onTapSelect(arg, ges_ev)
-	if self.btn_disconnect then
-		-- noop if touch is not on disconnect button
-		if ges_ev.pos:intersectWith(self.btn_disconnect.dimen) then
-			self:disconnect()
-		end
-	-- elseif self.info.password then
-	-- 	if self.btn_edit_nw and ges_ev.pos:intersectWith(self.btn_edit_nw.dimen) then
-	-- 		self:onEditNetwork()
-	-- 	else
-	-- 		self:connect()
-	-- 	end
-	else
-		-- self:onAddNetwork()
-		self:connect()
-	end
-	return true
-end
-
+---@class NetworkSetting
+---@field width number
+---@field height number
+---@field device_list any[]
 local NetworkSetting = InputContainer:extend({
 	width = nil,
 	height = nil,
-	-- sample network_list entry: {
-	--   bssid = "any",
-	--   ssid = "foo",
-	--   signal_level = -58,
-	--   signal_quality = 84,
-	--   frequency = 5660,
-	--   flags = "[WPA2-PSK-CCMP][ESS]",
-	-- }
 	device_list = nil,
 	connect_callback = nil,
 	disconnect_callback = nil,
+	forget_callback = nil,
 })
 
 function NetworkSetting:init()
@@ -373,7 +245,8 @@ function NetworkSetting:init()
 
 	local gray_bg = Blitbuffer.COLOR_GRAY_E
 	local items = {}
-	for idx, network in ipairs(self.device_list) do
+
+	for idx, device in ipairs(self.device_list) do
 		local bg
 		if band(idx, 1) == 0 then
 			bg = gray_bg
@@ -384,7 +257,7 @@ function NetworkSetting:init()
 			items,
 			NetworkItem:new({
 				width = self.width,
-				info = network,
+				info = device,
 				background = bg,
 				setting_ui = self,
 			})
@@ -450,10 +323,6 @@ function NetworkSetting:init()
 		}
 	end
 
-	-- If the backend is already authenticated,
-	-- and NetworkMgr:reconnectOrShowNetworkMenu somehow missed it,
-	-- expedite the process.
-	-- Yes, this is a very old codepath that's hardly ever exercised anymore...
 	if not self.connect_callback then
 		return
 	end
@@ -461,11 +330,8 @@ function NetworkSetting:init()
 	UIManager:nextTick(function()
 		local connected_item = self:getConnectedItem()
 		if connected_item ~= nil then
-			-- if G_reader_settings:nilOrTrue("auto_dismiss_wifi_scan") then
-			-- 	UIManager:close(self)
-			-- end
 			UIManager:show(InfoMessage:new({
-				text = T(_("Connected to network %1"), BD.wrap(connected_item.display_ssid)),
+				text = T(_("Connected to network %1"), BD.wrap(connected_item.info.name)),
 				timeout = 3,
 			}))
 			self.connect_callback()
@@ -489,8 +355,15 @@ function NetworkSetting:onTapClose(arg, ges_ev)
 end
 
 function NetworkSetting:onCloseWidget()
-	-- If we don't have a connectivity check ticking, assume we're done with this connection attempt *now*
 	UIManager:setDirty(nil, "ui", self.popup.dimen)
+end
+
+function NetworkSetting:onRefreshList()
+	self.device_list = self.refresh_list_callback()
+
+	UIManager:setDirty(self, function()
+		return "ui", self.popup.dimen
+	end)
 end
 
 return NetworkSetting

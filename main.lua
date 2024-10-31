@@ -221,7 +221,7 @@ function Bluetooth:addToMainMenu(menu_items)
 					return self:isBluetoothOn()
 				end,
 				callback = function()
-					self:onRefreshPairing()
+					self:onRefreshInput()
 				end,
 			},
 		},
@@ -288,12 +288,7 @@ function Bluetooth:isDiscoveryOn()
 	return self.manager:isDiscoveryOn()
 end
 
-function Bluetooth:onRefreshPairing()
-	if not self:isBluetoothOn() then
-		self:popup(_("Bluetooth is off. Please turn it on before refreshing pairing."))
-		return
-	end
-
+function Bluetooth:onRefreshInput()
 	local status, err = pcall(function()
 		-- Ensure the device path is valid
 		if not self.input_device_path or self.input_device_path == "" then
@@ -314,10 +309,8 @@ end
 ---@param device BluetoothItem
 function Bluetooth:onConnectToDevice(device)
 	if not device then
-		logger.warn("********** using default device *********")
-		device = {}
-		device.path = "/org/bluez/hci0/dev_E4_17_D8_57_48_C5"
-		device.name = "DEFAULT"
+		self:popup(_("Error: no BT device"))
+		return
 	end
 
 	logger.warn("bluetooth connecting to:", device.name)
@@ -347,25 +340,59 @@ function Bluetooth:onConnectToDevice(device)
 	device.connected = is_connected
 
 	if is_connected then
+		self:onRefreshInput()
 		self:popup(_("Connection successful: ") .. device.name)
 	else
 		self:popup(_("Result: ") .. result_connect) -- Show full result for debugging if something goes wrong
 	end
 end
 
+function Bluetooth:onDisconnectFromDevice(device)
+	local result = self.manager:disconnectDevice(device)
+	local is_connected = self.manager:isDeviceConnected(device)
+
+	if not is_connected then
+		self:popup(_("Deconnection successful: ") .. device.name)
+	else
+		self:popup(_("Result: ") .. result) -- Show full result for debugging if something goes wrong
+	end
+end
+
+function Bluetooth:onRemoveDevice(device)
+	local is_connected = self.manager:isDeviceConnected(device)
+	if is_connected then
+		self:onDisconnectFromDevice(device)
+	end
+
+	local result = self.manager:removeDevice(device)
+end
+
 function Bluetooth:onListDevices()
 	local devices = self.manager:listDevices()
 	for _, obj in ipairs(devices) do
-		logger.warn("Object Path:", obj.path)
-		logger.warn("Object Name:", obj.name)
-		logger.warn("Object Address:", obj.address)
-		logger.warn("Object RSSI:", obj.rssi)
+		logger.dbg("Object Path:", obj.path)
+		logger.dbg("Object Name:", obj.name)
+		logger.dbg("Object Address:", obj.address)
+		logger.dbg("Object Interface:", obj.interface)
 	end
 
 	UIManager:show(require("bluetoothwidget"):new({
 		device_list = devices,
 		connect_callback = function(device)
+			logger.warn("connect_callback for:", device.name)
 			self:onConnectToDevice(device)
+		end,
+		disconnect_callback = function(device)
+			logger.warn("disconnect_callback for:", device.name)
+			self:onDisconnectFromDevice(device)
+		end,
+		forget_callback = function(device)
+			logger.warn("remove_callback for:", device.name)
+			self:onRemoveDevice(device)
+		end,
+		refresh_list_callback = function()
+			logger.warn("refresh_list_callback")
+			return self.manager:listDevices()
 		end,
 	}))
 end

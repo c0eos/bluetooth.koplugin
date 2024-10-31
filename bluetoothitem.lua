@@ -5,6 +5,7 @@
 ---@field paired boolean | nil
 ---@field rssi string | nil
 ---@field trusted boolean | nil
+---@field interface? string | nil
 ---@field path? string | nil
 local BluetoothItem = {
 	address = nil,
@@ -14,6 +15,7 @@ local BluetoothItem = {
 	rssi = nil,
 	trusted = nil,
 
+	interface = nil,
 	path = nil,
 }
 

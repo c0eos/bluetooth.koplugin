@@ -19,7 +19,7 @@ function BluetoothManager:_run_dbus_command(command)
 	local result = handle:read("*a")
 	handle:close()
 
-	logger.warn("bluetooth result", result)
+	logger.dbg("bluetooth result", result)
 	return result
 end
 
@@ -44,7 +44,7 @@ function BluetoothManager:_create_dbus_command(dest, device_path, interface, met
 		command = command .. " " .. arg
 	end
 
-	logger.warn("bluetooth command:", command)
+	logger.dbg("bluetooth command:", command)
 	return command
 end
 
@@ -73,12 +73,17 @@ function BluetoothManager:_parseManagedObjects(result)
 			current_property = interface_name
 		end
 
-		local type, value = line:match("^%s+variant%s+([%w%d]*)%s+(.*)$")
+		local string_type, value = line:match("^%s+variant%s+([%w%d]*)%s+(.*)$")
+
+		local function all_trim(s)
+			return s:match("^%s*(.*)"):match("(.-)%s*$")
+		end
 
 		if current_property and value then
-			if type == "boolean" then
+			value = all_trim(value)
+			if string_type == "boolean" then
 				value = value == "true"
-			elseif type == "int16" or type == "int32" or type == "uint16" or type == "uint32" then
+			elseif string_type:match("int%d%d") then
 				value = tonumber(value)
 			else
 				value = value:match('"(.*)"')
@@ -199,19 +204,19 @@ end
 ---@param device BluetoothItem
 ---@return boolean
 function BluetoothManager:isDeviceTrusted(device)
-	return self:_getProperty(device.path, self.adapter_interface, "Trusted")
+	return self:_getProperty(device.path, device.interface, "Trusted")
 end
 
 ---@param device BluetoothItem
 ---@return boolean
 function BluetoothManager:isDevicePaired(device)
-	return self:_getProperty(device.path, self.adapter_interface, "Paired")
+	return self:_getProperty(device.path, device.interface, "Paired")
 end
 
 ---@param device BluetoothItem
 ---@return boolean
 function BluetoothManager:isDeviceConnected(device)
-	return self:_getProperty(device.path, self.adapter_interface, "Connected")
+	return self:_getProperty(device.path, device.interface, "Connected")
 end
 
 -- Get device or adapter property (e.g., Powered, Connected, Paired, etc.)
@@ -236,7 +241,25 @@ end
 ---@param result string
 ---@return boolean | number | string
 function BluetoothManager:_parseResult(result)
-	return result
+	local string_type, value = result:match("([%w%d]*)%s+(.*)%s*")
+
+	local function all_trim(s)
+		return s:match("^%s*(.*)"):match("(.-)%s*$")
+	end
+
+	if value then
+		value = all_trim(value)
+		if string_type == "boolean" then
+			value = value == "true"
+		elseif string_type:match("int%d%d") then
+			value = tonumber(value)
+		else
+			value = value:match('"(.*)"')
+		end
+	else
+		value = "none"
+	end
+	return value
 end
 
 -- Set device or adapter property
