@@ -12,20 +12,29 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Device = require("device")
 local EventListener = require("ui/widget/eventlistener")
-local Event = require("ui/event") -- Add this line
+local Event = require("ui/event")
 local logger = require("logger")
-
--- local BTKeyManager = require("BTKeyManager")
 
 local _ = require("gettext")
 
--- local Bluetooth = EventListener:extend{
+---@class Bluetooth
 local Bluetooth = InputContainer:extend({
 	name = "Bluetooth",
-	input_device_path = "/dev/input/event3", -- Device path
-	adapter_path = "/org/bluez/hci0", -- BT adapter path
-	dbus_dest = "com.kobo.mtk.bluedroid", -- dest for dbus-send
+	input_device_path = "/dev/input/event3", -- Device path TODO: automate
+	event_map = nil, -- TODO: load settings from file
+	last_connected_device = nil, -- TODO: auto reconnect to last device when bluetooth starts
+	manager = nil, -- Bluetooth "backend", only dbus so far
 })
+
+function Bluetooth:init()
+	self:onDispatcherRegisterActions()
+	self.ui.menu:registerToMainMenu(self)
+
+	self:registerKeyEvents()
+	self:registerEventMap()
+
+	self:registerManager()
+end
 
 function Bluetooth:onDispatcherRegisterActions()
 	Dispatcher:registerAction(
@@ -139,11 +148,20 @@ function Bluetooth:onBTToggleStatusBar()
 	UIManager:sendEvent(Event:new("ToggleFooterMode"))
 end
 
-function Bluetooth:init()
-	self:onDispatcherRegisterActions()
-	self.ui.menu:registerToMainMenu(self)
+function Bluetooth:registerEventMap()
+	local additional_event_map = {
+		[105] = "BTLeft", -- Left for Previous Page
+		[106] = "BTRight", -- Right for Next Page
+		[109] = "BTBluetoothOff", -- Page Down for Bluetooth Off
+	}
+	for key, value in pairs(additional_event_map) do
+		Device.input.event_map[key] = value
+	end
+end
 
-	self:registerKeyEvents()
+function Bluetooth:registerManager()
+	---@type BluetoothManager
+	self.manager = require("bluetoothmanagerdbus"):new({})
 end
 
 function Bluetooth:addToMainMenu(menu_items)
@@ -156,7 +174,6 @@ function Bluetooth:addToMainMenu(menu_items)
 				keep_menu_open = true,
 				checked_func = function()
 					return self:isBluetoothOn()
-					-- return false
 				end,
 				callback = function(touchmenu_instance)
 					self:onBluetoothToggle()
@@ -180,23 +197,52 @@ function Bluetooth:addToMainMenu(menu_items)
 					self:onRefreshPairing()
 				end,
 			},
+			{
+				text = _("Scanning..."),
+				keep_menu_open = true,
+				enabled_func = function()
+					return self:isBluetoothOn()
+				end,
+				callback = function()
+					self:onDiscoverDevices()
+				end,
+			},
 		},
 	}
 end
 
-function Bluetooth:onBluetoothOn()
-	local result = self:setPowered(true)
+function Bluetooth:debugPopup(msg)
+	self:popup(_("DEBUG: ") .. msg)
+end
 
-	if string.match(result, "true") ~= nil then
+function Bluetooth:popup(text)
+	local popup = InfoMessage:new({
+		text = text,
+	})
+	UIManager:show(popup)
+end
+
+function Bluetooth:isWifiEnabled()
+	local handle = io.popen("iwconfig")
+	local result = handle:read("*a")
+	handle:close()
+
+	-- Check if Wi-Fi is enabled by looking for 'ESSID'
+	return result:match("ESSID") ~= nil
+end
+
+function Bluetooth:onBluetoothOn()
+	local result = self.manager:setBluetoothOn()
+
+	if result then
 		self:popup(_("Bluetooth turned on."))
-		self:popup(_("Result: ") .. result)
 	else
 		self:popup(_("Result: ") .. result)
 	end
 end
 
 function Bluetooth:onBluetoothOff()
-	self:setPowered(false)
+	local result = self.manager:setBluetoothOff()
 	self:popup(_("Bluetooth turned off."))
 end
 
@@ -209,8 +255,7 @@ function Bluetooth:onBluetoothToggle()
 end
 
 function Bluetooth:isBluetoothOn()
-	local result = self:getProperty(self.adapter_path, "org.bluez.Adapter1", "Powered")
-	return string.match(result, "true") ~= nil
+	return self.manager:isBluetoothOn()
 end
 
 function Bluetooth:onRefreshPairing()
@@ -227,6 +272,7 @@ function Bluetooth:onRefreshPairing()
 
 		Device.input.close(self.input_device_path) -- Close the input using the high-level parameter
 		Device.input.open(self.input_device_path) -- Reopen the input using the high-level parameter
+
 		self:popup(_("Bluetooth device at ") .. self.input_device_path .. " is now open.")
 	end)
 
@@ -235,13 +281,12 @@ function Bluetooth:onRefreshPairing()
 	end
 end
 
-function Bluetooth:onConnectToDevice()
-	if not self:isBluetoothOn() then
-		self:popup(_("Bluetooth is off. Please turn it on before connecting to a device."))
-		return
+function Bluetooth:onConnectToDevice(device_path)
+	if not device_path then
+		device_path = "/org/bluez/hci0/dev_E4_17_D8_57_48_C5"
 	end
 
-	local device_path = "/org/bluez/hci0/dev_E4_17_D8_57_48_C5"
+	logger.warn("bluetooth connecting to:", device_path)
 
 	local is_trusted = string.match(self:getProperty(device_path, "org.bluez.Device1", "Trusted"), "true") ~= nil
 	local is_paired = string.match(self:getProperty(device_path, "org.bluez.Device1", "Paired"), "true") ~= nil
@@ -270,117 +315,37 @@ function Bluetooth:onConnectToDevice()
 	end
 end
 
-function Bluetooth:debugPopup(msg)
-	self:popup(_("DEBUG: ") .. msg)
-end
+function Bluetooth:onDiscoverDevices()
+	local is_discovering = string.match(
+		self:getProperty(self.adapter_path, "org.bluez.Adapter1", "Discovering"),
+		"true"
+	) ~= nil
+	logger.warn("bluetooth discovering:", is_discovering)
 
-function Bluetooth:popup(text)
-	local popup = InfoMessage:new({
-		text = text,
-	})
-	UIManager:show(popup)
-end
+	local result_managed_objects = self:getManagedObjects()
+	result_managed_objects = self:parseManagedObjects(result_managed_objects)
+	for _, obj in ipairs(result_managed_objects) do
+		logger.warn("Object Path:", obj.path)
+		logger.warn("Object Name:", obj.Name)
+		logger.warn("Object Address:", obj.Address)
+		logger.warn("Object RSSI:", obj.RSSI)
+	end
+	-- logger.warn("bluetooth objects:", self:parseManagedObjects(result_managed_objects))
+	UIManager:show(require("bluetoothwidget"):new({
+		device_list = result_managed_objects,
+		connect_callback = function(device_path)
+			self:onConnectToDevice(device_path)
+		end,
+	}))
 
-function Bluetooth:isWifiEnabled()
-	local handle = io.popen("iwconfig")
-	local result = handle:read("*a")
-	handle:close()
-
-	-- Check if Wi-Fi is enabled by looking for 'ESSID'
-	return result:match("ESSID") ~= nil
-end
-
-function Bluetooth:run_dbus_command(command)
-	local handle = io.popen(command .. " 2>&1")
-	local result = handle:read("*a")
-	handle:close()
-
-	logger.warn("bluetooth result", result)
-	return result
-end
-
-function Bluetooth:create_dbus_command(dest, device_path, interface, method, args)
-	local command = "dbus-send --system --dest="
-		.. dest
-		.. " --type=method_call --print-reply "
-		.. device_path
-		.. " "
-		.. interface
-		.. "."
-		.. method
-
-	for _, arg in ipairs(args or {}) do
-		command = command .. " " .. arg
+	local result_discovery
+	if is_discovering then
+		-- result_discovery = self:stopDiscovery()
+	else
+		result_discovery = self:startDiscovery()
 	end
 
-	logger.warn("bluetooth command:", command)
-	return command
-end
-
--- Discover devices
-function Bluetooth:startDiscovery()
-	local command = self:create_dbus_command(self.dbus_dest, self.adapter_path, "org.bluez.Adapter1", "StartDiscovery")
-	return self:run_dbus_command(command)
-end
-
-function Bluetooth:stopDiscovery()
-	local command = self:create_dbus_command(self.dbus_dest, self.adapter_path, "org.bluez.Adapter1", "StopDiscovery")
-	return self:run_dbus_command(command)
-end
-
--- Set device as trusted
-function Bluetooth:setTrusted(device_path, value)
-	return self:setProperty(device_path, "org.bluez.Device1", "Trusted", value)
-end
-
--- Pair with a device
-function Bluetooth:pair(device_path)
-	local command = self:create_dbus_command(self.dbus_dest, device_path, "org.bluez.Device1", "Pair")
-	return self:run_dbus_command(command)
-end
-
--- Connect to a device
-function Bluetooth:connect(device_path)
-	local command = self:create_dbus_command(self.dbus_dest, device_path, "org.bluez.Device1", "Connect")
-	return self:run_dbus_command(command)
-end
-
--- Disconnect from a device
-function Bluetooth:disconnect(device_path)
-	local command = self:create_dbus_command(self.dbus_dest, device_path, "org.bluez.Device1", "Disconnect")
-	return self:run_dbus_command(command)
-end
-
--- Power on or off the adapter
-function Bluetooth:setPowered(value)
-	return self:setProperty(self.adapter_path, "org.bluez.Adapter1", "Powered", value)
-end
-
--- Get device or adapter property (e.g., Powered, Connected, Paired, etc.)
-function Bluetooth:getProperty(device_path, interface, property)
-	local args = {
-		"string:'" .. interface .. "'",
-		"string:'" .. property .. "'",
-	}
-	local command =
-		self:create_dbus_command(self.dbus_dest, device_path, "org.freedesktop.DBus.Properties", "Get", args)
-	local output = self:run_dbus_command(command)
-	local result = output:match("variant%s+(.+)")
-	return result
-end
-
--- Set device or adapter property
-function Bluetooth:setProperty(device_path, interface, property, value)
-	local args = {
-		"string:'" .. interface .. "'",
-		"string:'" .. property .. "'",
-		"variant:boolean:" .. tostring(value),
-	}
-	local command =
-		self:create_dbus_command(self.dbus_dest, device_path, "org.freedesktop.DBus.Properties", "Set", args)
-	local output = self:run_dbus_command(command)
-	local result = self:getProperty(device_path, interface, property)
-	return result
+	logger.warn("bluetooth discovery:", result_discovery)
 end
 
 return Bluetooth
