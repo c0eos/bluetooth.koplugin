@@ -18,6 +18,10 @@ local logger = require("logger")
 local _ = require("gettext")
 
 ---@class Bluetooth
+---@field name string
+---@field input_device_path string
+---@field event_map table
+---@field manager BluetoothManager
 local Bluetooth = InputContainer:extend({
 	name = "Bluetooth",
 	input_device_path = "/dev/input/event3", -- Device path TODO: automate
@@ -160,8 +164,7 @@ function Bluetooth:registerEventMap()
 end
 
 function Bluetooth:registerManager()
-	---@type BluetoothManager
-	self.manager = require("bluetoothmanagerdbus"):new({})
+	self.manager = require("bluetoothmanagerdbus")
 end
 
 function Bluetooth:addToMainMenu(menu_items)
@@ -181,6 +184,27 @@ function Bluetooth:addToMainMenu(menu_items)
 				end,
 			},
 			{
+				text = _("Discovering"),
+				keep_menu_open = true,
+				checked_func = function()
+					return self:isBluetoothOn() and self:isDiscoveryOn()
+				end,
+				callback = function(touchmenu_instance)
+					self:onDiscoveryToggle()
+					touchmenu_instance:updateItems()
+				end,
+			},
+			{
+				text = _("List devices"),
+				keep_menu_open = true,
+				enabled_func = function()
+					return self:isBluetoothOn()
+				end,
+				callback = function()
+					self:onListDevices()
+				end,
+			},
+			{
 				text = _("Reconnect to Device"),
 				keep_menu_open = true,
 				enabled_func = function()
@@ -193,18 +217,11 @@ function Bluetooth:addToMainMenu(menu_items)
 			{
 				text = _("Refresh Device Input"), -- New menu item
 				keep_menu_open = true,
-				callback = function()
-					self:onRefreshPairing()
-				end,
-			},
-			{
-				text = _("Scanning..."),
-				keep_menu_open = true,
 				enabled_func = function()
 					return self:isBluetoothOn()
 				end,
 				callback = function()
-					self:onDiscoverDevices()
+					self:onRefreshPairing()
 				end,
 			},
 		},
@@ -258,6 +275,19 @@ function Bluetooth:isBluetoothOn()
 	return self.manager:isBluetoothOn()
 end
 
+function Bluetooth:onDiscoveryToggle()
+	local result
+	if self.manager:isDiscoveryOn() then
+		result = self.manager:stopDiscovery()
+	else
+		result = self.manager:startDiscovery()
+	end
+end
+
+function Bluetooth:isDiscoveryOn()
+	return self.manager:isDiscoveryOn()
+end
+
 function Bluetooth:onRefreshPairing()
 	if not self:isBluetoothOn() then
 		self:popup(_("Bluetooth is off. Please turn it on before refreshing pairing."))
@@ -281,71 +311,63 @@ function Bluetooth:onRefreshPairing()
 	end
 end
 
-function Bluetooth:onConnectToDevice(device_path)
-	if not device_path then
-		device_path = "/org/bluez/hci0/dev_E4_17_D8_57_48_C5"
+---@param device BluetoothItem
+function Bluetooth:onConnectToDevice(device)
+	if not device then
+		logger.warn("********** using default device *********")
+		device = {}
+		device.path = "/org/bluez/hci0/dev_E4_17_D8_57_48_C5"
+		device.name = "DEFAULT"
 	end
 
-	logger.warn("bluetooth connecting to:", device_path)
+	logger.warn("bluetooth connecting to:", device.name)
+	logger.warn("bluetooth connecting with path:", device.path)
 
-	local is_trusted = string.match(self:getProperty(device_path, "org.bluez.Device1", "Trusted"), "true") ~= nil
-	local is_paired = string.match(self:getProperty(device_path, "org.bluez.Device1", "Paired"), "true") ~= nil
+	local is_trusted = self.manager:isDeviceTrusted(device)
+	local is_paired = self.manager:isDevicePaired(device)
 
 	if not is_trusted then
-		local result_trust = self:setTrusted(device_path, true)
-		logger.warn("bluetooth trust:", result_trust)
+		is_trusted = self.manager:setTrusted(device, true)
+		device.trusted = is_trusted
+		logger.warn("bluetooth trust:", is_trusted)
 	end
 
 	if not is_paired then
-		local result_pairing = self:pair(device_path)
+		local result_pairing = self.manager:pairDevice(device)
+		is_paired = self.manager:isDevicePaired(device)
+		device.paired = is_paired
 		logger.warn("bluetooth pairing:", result_pairing)
+		logger.warn("bluetooth pairing:", is_paired)
 	end
 
-	local result_connect = self:connect(device_path)
+	local result_connect = self.manager:connectDevice(device)
 	logger.warn("bluetooth connect:", result_connect)
 
-	local is_connected = string.match(self:getProperty(device_path, "org.bluez.Device1", "Connected"), "true") ~= nil
+	local is_connected = self.manager:isDeviceConnected(device)
+	device.connected = is_connected
 
-	local device_name = self:getProperty(device_path, "org.bluez.Device1", "Name")
-
-	if is_connected and device_name then
-		self:popup(_("Connection successful: ") .. device_name)
+	if is_connected then
+		self:popup(_("Connection successful: ") .. device.name)
 	else
 		self:popup(_("Result: ") .. result_connect) -- Show full result for debugging if something goes wrong
 	end
 end
 
-function Bluetooth:onDiscoverDevices()
-	local is_discovering = string.match(
-		self:getProperty(self.adapter_path, "org.bluez.Adapter1", "Discovering"),
-		"true"
-	) ~= nil
-	logger.warn("bluetooth discovering:", is_discovering)
-
-	local result_managed_objects = self:getManagedObjects()
-	result_managed_objects = self:parseManagedObjects(result_managed_objects)
-	for _, obj in ipairs(result_managed_objects) do
+function Bluetooth:onListDevices()
+	local devices = self.manager:listDevices()
+	for _, obj in ipairs(devices) do
 		logger.warn("Object Path:", obj.path)
-		logger.warn("Object Name:", obj.Name)
-		logger.warn("Object Address:", obj.Address)
-		logger.warn("Object RSSI:", obj.RSSI)
+		logger.warn("Object Name:", obj.name)
+		logger.warn("Object Address:", obj.address)
+		logger.warn("Object RSSI:", obj.rssi)
 	end
-	-- logger.warn("bluetooth objects:", self:parseManagedObjects(result_managed_objects))
+
 	UIManager:show(require("bluetoothwidget"):new({
-		device_list = result_managed_objects,
-		connect_callback = function(device_path)
-			self:onConnectToDevice(device_path)
+		device_list = devices,
+		connect_callback = function(device)
+			self:onConnectToDevice(device)
 		end,
 	}))
-
-	local result_discovery
-	if is_discovering then
-		-- result_discovery = self:stopDiscovery()
-	else
-		result_discovery = self:startDiscovery()
-	end
-
-	logger.warn("bluetooth discovery:", result_discovery)
 end
 
 return Bluetooth

@@ -2,6 +2,9 @@ local logger = require("logger")
 local _ = require("gettext")
 
 ---@class BluetoothManager
+---@field protected adapter_path string
+---@field protected adapter_interface string
+---@field protected dbus_dest string
 local BluetoothManager = {
 	adapter_path = "/org/bluez/hci0", -- BT adapter path TODO: automate
 	adapter_interface = "org.bluez.Adapter1", -- interface for dbus TODO: automate with Introspect?
@@ -80,7 +83,7 @@ function BluetoothManager:_parseManagedObjects(result)
 			else
 				value = value:match('"(.*)"')
 			end
-			current_object[current_property] = value
+			current_object[current_property:lower()] = value
 			current_property = nil
 		end
 	end
@@ -97,6 +100,12 @@ function BluetoothManager:_getManagedObjects()
 	return self:_run_dbus_command(command)
 end
 
+---@return BluetoothItem[]
+function BluetoothManager:listDevices()
+	local result = self:_getManagedObjects()
+	return self:_parseManagedObjects(result)
+end
+
 -- Discover devices
 function BluetoothManager:startDiscovery()
 	local command =
@@ -108,6 +117,11 @@ function BluetoothManager:stopDiscovery()
 	local command =
 		self:_create_dbus_command(self.dbus_dest, self.adapter_path, self.adapter_interface, "StopDiscovery")
 	return self:_run_dbus_command(command)
+end
+
+---@return boolean
+function BluetoothManager:isDiscoveryOn()
+	return self:_getProperty(self.adapter_path, self.adapter_interface, "Discovering")
 end
 
 -- Set device as trusted
@@ -180,6 +194,24 @@ end
 ---@return boolean
 function BluetoothManager:isBluetoothOn()
 	return self:_getProperty(self.adapter_path, self.adapter_interface, "Powered")
+end
+
+---@param device BluetoothItem
+---@return boolean
+function BluetoothManager:isDeviceTrusted(device)
+	return self:_getProperty(device.path, self.adapter_interface, "Trusted")
+end
+
+---@param device BluetoothItem
+---@return boolean
+function BluetoothManager:isDevicePaired(device)
+	return self:_getProperty(device.path, self.adapter_interface, "Paired")
+end
+
+---@param device BluetoothItem
+---@return boolean
+function BluetoothManager:isDeviceConnected(device)
+	return self:_getProperty(device.path, self.adapter_interface, "Connected")
 end
 
 -- Get device or adapter property (e.g., Powered, Connected, Paired, etc.)
